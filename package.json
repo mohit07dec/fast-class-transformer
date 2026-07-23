@@ -1,0 +1,38 @@
+{
+  "name": "fast-class-transformer",
+  "version": "1.0.0",
+  "description": "A zero-dependency, ahead-of-time (AoT) compiled, ultra-fast alternative to class-transformer for TypeScript and NestJS.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "benchmark": "ts-node benchmark.ts"
+  },
+  "keywords": [
+    "class-transformer",
+    "nestjs",
+    "typescript",
+    "validation",
+    "mapping",
+    "fast",
+    "performance",
+    "aot"
+  ],
+  "author": "Mohit",
+  "license": "MIT",
+  "dependencies": {},
+  "peerDependencies": {
+    "typescript": ">=4.5.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.24",
+    "class-transformer": "^0.5.1",
+    "jest": "^29.7.0",
+    "reflect-metadata": "^0.2.2",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
