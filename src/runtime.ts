@@ -10,7 +10,17 @@ export interface ClassTransformOptions {
   exposeUnsetFields?: boolean;
   strategy?: 'excludeAll' | 'exposeAll';
   enableCircularCheck?: boolean;
+  validate?: boolean; // Enable single-pass compiled validation
 }
+
+export class FastValidationError extends Error {
+  isValidationError = true;
+  constructor(public errors: any[]) {
+    super('Validation failed');
+  }
+}
+
+const MAX_CACHE_SIZE = 128;
 
 function getCacheKey(options?: ClassTransformOptions): string {
   if (!options) return 'default';
@@ -20,34 +30,84 @@ function getCacheKey(options?: ClassTransformOptions): string {
   if (options.excludeExtraneousValues) parts.push(`ee:1`);
   if (options.exposeDefaultValues !== undefined) parts.push(`ed:${options.exposeDefaultValues ? 1 : 0}`);
   if (options.exposeUnsetFields !== undefined) parts.push(`eu:${options.exposeUnsetFields ? 1 : 0}`);
+  if (options.validate) parts.push(`val:1`);
   return parts.length ? parts.join('|') : 'default';
 }
+
+// Map of common class-validators to their inline assertions
+const validatorGen: Record<string, (sourceKey: string, targetKey: string, constraints: any[]) => string> = {
+  isString: (src, tgt) => `if (typeof plain['${src}'] !== 'string') {
+    errors.push({ property: '${tgt}', constraints: { isString: '${tgt} must be a string' }, value: plain['${src}'] });
+  }`,
+  isNumber: (src, tgt) => `if (typeof plain['${src}'] !== 'number' || isNaN(plain['${src}'])) {
+    errors.push({ property: '${tgt}', constraints: { isNumber: '${tgt} must be a number' }, value: plain['${src}'] });
+  }`,
+  isInt: (src, tgt) => `if (typeof plain['${src}'] !== 'number' || !Number.isInteger(plain['${src}'])) {
+    errors.push({ property: '${tgt}', constraints: { isInt: '${tgt} must be an integer' }, value: plain['${src}'] });
+  }`,
+  isBoolean: (src, tgt) => `if (typeof plain['${src}'] !== 'boolean') {
+    errors.push({ property: '${tgt}', constraints: { isBoolean: '${tgt} must be a boolean' }, value: plain['${src}'] });
+  }`,
+  isNotEmpty: (src, tgt) => `if (plain['${src}'] === null || plain['${src}'] === undefined || plain['${src}'] === '') {
+    errors.push({ property: '${tgt}', constraints: { isNotEmpty: '${tgt} should not be empty' }, value: plain['${src}'] });
+  }`,
+  isArray: (src, tgt) => `if (!Array.isArray(plain['${src}'])) {
+    errors.push({ property: '${tgt}', constraints: { isArray: '${tgt} must be an array' }, value: plain['${src}'] });
+  }`,
+  min: (src, tgt, constr) => `if (typeof plain['${src}'] === 'number' && plain['${src}'] < ${constr[0]}) {
+    errors.push({ property: '${tgt}', constraints: { min: '${tgt} must not be less than ${constr[0]}' }, value: plain['${src}'] });
+  }`,
+  max: (src, tgt, constr) => `if (typeof plain['${src}'] === 'number' && plain['${src}'] > ${constr[0]}) {
+    errors.push({ property: '${tgt}', constraints: { max: '${tgt} must not be greater than ${constr[0]}' }, value: plain['${src}'] });
+  }`,
+  isEmail: (src, tgt) => `if (typeof plain['${src}'] !== 'string' || !/\\S+@\\S+\\.\\S+/.test(plain['${src}'])) {
+    errors.push({ property: '${tgt}', constraints: { isEmail: '${tgt} must be an email' }, value: plain['${src}'] });
+  }`,
+  isDateString: (src, tgt) => `if (typeof plain['${src}'] !== 'string' || isNaN(Date.parse(plain['${src}']))) {
+    errors.push({ property: '${tgt}', constraints: { isDateString: '${tgt} must be a valid ISO 8601 date string' }, value: plain['${src}'] });
+  }`
+};
 
 function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOptions): (plain: any, options?: ClassTransformOptions) => T {
   const props = defaultMetadataStorage.getAncestorMetadata(cls);
 
-  if (props.length === 0) {
-    return function (plain: any) {
-      if (plain == null) return plain;
-      const inst = new cls();
-      Object.assign(inst as any, plain);
-      return inst;
-    };
+  // Retrieve external class-validator metadata storage if present
+  let validationRules = new Map<string, any[]>();
+  try {
+    const { getMetadataStorage } = require('class-validator');
+    const storage = getMetadataStorage();
+    const metadatas = storage.getTargetValidationMetadatas(cls, null, false, false);
+    if (metadatas) {
+      for (let i = 0; i < metadatas.length; i++) {
+        const meta = metadatas[i];
+        let rules = validationRules.get(meta.propertyName);
+        if (!rules) {
+          rules = [];
+          validationRules.set(meta.propertyName, rules);
+        }
+        rules.push(meta);
+      }
+    }
+  } catch (e) {
+    // class-validator is not installed, validation checks skipped
   }
 
   const bodyLines: string[] = [];
   bodyLines.push("if (plain == null) return plain;");
+  bodyLines.push("const errors = [];");
   bodyLines.push("const inst = new cls();");
 
   const context: Record<string, any> = {
     cls,
     plainToInstance,
+    FastValidationError,
   };
 
   const groups = options?.groups;
   const version = options?.version;
   const excludeExtraneous = options?.excludeExtraneousValues || options?.strategy === 'excludeAll';
 
+  // 1. Map all properties and inject inline validation
   props.forEach((prop, idx) => {
     if (prop.exclude && prop.exclude.toClassOnly !== false) {
       return;
@@ -74,6 +134,22 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
     const sourceKey = prop.expose?.name || prop.name;
     const targetKey = prop.name;
 
+    // Inline validation generation
+    const rules = validationRules.get(prop.name);
+    if (rules && rules.length > 0) {
+      bodyLines.push(`  if (options && options.validate) {`);
+      rules.forEach(rule => {
+        const type = rule.name || rule.type;
+        const constr = rule.constraints;
+        const gen = validatorGen[type];
+        if (gen) {
+          bodyLines.push('    ' + gen(sourceKey, targetKey, constr));
+        }
+      });
+      bodyLines.push(`  }`);
+    }
+
+    // Property assignment mapping
     if (prop.transformFn) {
       const transformKey = `transform_${idx}`;
       context[transformKey] = prop.transformFn;
@@ -81,11 +157,16 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       bodyLines.push(`    inst['${targetKey}'] = ${transformKey}({ value: plain['${sourceKey}'], key: '${sourceKey}', obj: plain, type: 1 });`);
       bodyLines.push(`  }`);
     } else if (prop.typeFn) {
+      // Circular-reference safe nested mapping using lazy class evaluation
       const typeKey = `type_${idx}`;
       context[typeKey] = prop.typeFn;
       bodyLines.push(`  if (plain['${sourceKey}'] !== undefined && plain['${sourceKey}'] !== null) {`);
       bodyLines.push(`    const subClass = ${typeKey}();`);
-      bodyLines.push(`    inst['${targetKey}'] = plainToInstance(subClass, plain['${sourceKey}'], options);`);
+      bodyLines.push(`    if (subClass) {`);
+      bodyLines.push(`      inst['${targetKey}'] = plainToInstance(subClass, plain['${sourceKey}'], options);`);
+      bodyLines.push(`    } else {`);
+      bodyLines.push(`      inst['${targetKey}'] = plain['${sourceKey}'];`);
+      bodyLines.push(`    }`);
       bodyLines.push(`  } else {`);
       bodyLines.push(`    inst['${targetKey}'] = plain['${sourceKey}'];`);
       bodyLines.push(`  }`);
@@ -104,7 +185,12 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
         const typeKey = `type_${idx}`;
         context[typeKey] = () => designType;
         bodyLines.push(`  if (plain['${sourceKey}'] !== undefined && plain['${sourceKey}'] !== null) {`);
-        bodyLines.push(`    inst['${targetKey}'] = plainToInstance(${typeKey}(), plain['${sourceKey}'], options);`);
+        bodyLines.push(`    const subClass = ${typeKey}();`);
+        bodyLines.push(`    if (subClass) {`);
+        bodyLines.push(`      inst['${targetKey}'] = plainToInstance(subClass, plain['${sourceKey}'], options);`);
+        bodyLines.push(`    } else {`);
+        bodyLines.push(`      inst['${targetKey}'] = plain['${sourceKey}'];`);
+        bodyLines.push(`    }`);
         bodyLines.push(`  } else {`);
         bodyLines.push(`    inst['${targetKey}'] = plain['${sourceKey}'];`);
         bodyLines.push(`  }`);
@@ -115,6 +201,11 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       }
     }
   });
+
+  // Throw validation errors if validation option was passed
+  bodyLines.push(`  if (options && options.validate && errors.length > 0) {`);
+  bodyLines.push(`    throw new FastValidationError(errors);`);
+  bodyLines.push(`  }`);
 
   bodyLines.push("return inst;");
 
@@ -262,14 +353,17 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], 
   if (Array.isArray(plain)) {
     let mappers = (cls as any).__fastMappers__;
     if (!mappers) {
-      mappers = {};
+      mappers = new Map<string, Function>();
       (cls as any).__fastMappers__ = mappers;
     }
     const key = getCacheKey(options);
-    let mapper = mappers[key];
+    let mapper = mappers.get(key);
     if (!mapper) {
+      if (mappers.size >= MAX_CACHE_SIZE) {
+        mappers.clear();
+      }
       mapper = buildJitMapper(cls, options);
-      mappers[key] = mapper;
+      mappers.set(key, mapper);
     }
     const len = plain.length;
     const result = new Array(len);
@@ -281,14 +375,17 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], 
 
   let mappers = (cls as any).__fastMappers__;
   if (!mappers) {
-    mappers = {};
+    mappers = new Map<string, Function>();
     (cls as any).__fastMappers__ = mappers;
   }
   const key = getCacheKey(options);
-  let mapper = mappers[key];
+  let mapper = mappers.get(key);
   if (!mapper) {
+    if (mappers.size >= MAX_CACHE_SIZE) {
+      mappers.clear();
+    }
     mapper = buildJitMapper(cls, options);
-    mappers[key] = mapper;
+    mappers.set(key, mapper);
   }
   return mapper(plain, options);
 }
@@ -303,14 +400,17 @@ export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOp
     const cls = (instance[0] as any).constructor as ClassConstructor<any>;
     let serializers = (cls as any).__fastSerializers__;
     if (!serializers) {
-      serializers = {};
+      serializers = new Map<string, Function>();
       (cls as any).__fastSerializers__ = serializers;
     }
     const key = getCacheKey(options);
-    let serializer = serializers[key];
+    let serializer = serializers.get(key);
     if (!serializer) {
+      if (serializers.size >= MAX_CACHE_SIZE) {
+        serializers.clear();
+      }
       serializer = buildJitSerializer(cls, options);
-      serializers[key] = serializer;
+      serializers.set(key, serializer);
     }
     const len = instance.length;
     const result = new Array(len);
@@ -323,14 +423,17 @@ export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOp
   const cls = instance.constructor as ClassConstructor<any>;
   let serializers = (cls as any).__fastSerializers__;
   if (!serializers) {
-    serializers = {};
+    serializers = new Map<string, Function>();
     (cls as any).__fastSerializers__ = serializers;
   }
   const key = getCacheKey(options);
-  let serializer = serializers[key];
+  let serializer = serializers.get(key);
   if (!serializer) {
+    if (serializers.size >= MAX_CACHE_SIZE) {
+      serializers.clear();
+    }
     serializer = buildJitSerializer(cls, options);
-    serializers[key] = serializer;
+    serializers.set(key, serializer);
   }
   return serializer(instance, options);
 }
@@ -353,12 +456,23 @@ export function instanceToInstance<T>(instance: T | T[], options?: ClassTransfor
   return plainToInstance(instance.constructor as ClassConstructor<T>, plain, options);
 }
 
-// NestJS compatible validation/transformation Pipe that maps payload using JIT
 export class FastMapPipe {
   constructor(private readonly cls: ClassConstructor<any>, private readonly options?: ClassTransformOptions) {}
 
   transform(value: any) {
-    return plainToInstance(this.cls, value, this.options);
+    try {
+      return plainToInstance(this.cls, value, { ...this.options, validate: true });
+    } catch (e: any) {
+      if (e.isValidationError) {
+        try {
+          const { BadRequestException } = require('@nestjs/common');
+          throw new BadRequestException(e.errors);
+        } catch {
+          throw e;
+        }
+      }
+      throw e;
+    }
   }
 
   static get(cls: ClassConstructor<any>, options?: ClassTransformOptions) {
