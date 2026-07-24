@@ -30,11 +30,12 @@ function getCacheKey(options?: ClassTransformOptions): string {
   if (options.excludeExtraneousValues) parts.push(`ee:1`);
   if (options.exposeDefaultValues !== undefined) parts.push(`ed:${options.exposeDefaultValues ? 1 : 0}`);
   if (options.exposeUnsetFields !== undefined) parts.push(`eu:${options.exposeUnsetFields ? 1 : 0}`);
+  if (options.strategy) parts.push(`s:${options.strategy}`);
+  if (options.enableCircularCheck) parts.push(`cc:1`);
   if (options.validate) parts.push(`val:1`);
   return parts.length ? parts.join('|') : 'default';
 }
 
-// Map of common class-validators to their inline assertions
 const validatorGen: Record<string, (sourceKey: string, targetKey: string, constraints: any[]) => string> = {
   isString: (src, tgt) => `if (typeof plain['${src}'] !== 'string') {
     errors.push({ property: '${tgt}', constraints: { isString: '${tgt} must be a string' }, value: plain['${src}'] });
@@ -68,10 +69,9 @@ const validatorGen: Record<string, (sourceKey: string, targetKey: string, constr
   }`
 };
 
-function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOptions): (plain: any, options?: ClassTransformOptions) => T {
+function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOptions): (plain: any, options?: ClassTransformOptions, stack?: Set<any>) => T {
   const props = defaultMetadataStorage.getAncestorMetadata(cls);
 
-  // Retrieve external class-validator metadata storage if present
   let validationRules = new Map<string, any[]>();
   try {
     const { getMetadataStorage } = require('class-validator');
@@ -89,11 +89,19 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       }
     }
   } catch (e) {
-    // class-validator is not installed, validation checks skipped
+    // class-validator is not installed
   }
 
   const bodyLines: string[] = [];
   bodyLines.push("if (plain == null) return plain;");
+  
+  // Dynamic Circular Reference prevention
+  if (options?.enableCircularCheck) {
+    bodyLines.push("if (stack && stack.has(plain)) return undefined;");
+    bodyLines.push("if (!stack) stack = new Set();");
+    bodyLines.push("stack.add(plain);");
+  }
+
   bodyLines.push("const errors = [];");
   bodyLines.push("const inst = new cls();");
 
@@ -106,8 +114,9 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
   const groups = options?.groups;
   const version = options?.version;
   const excludeExtraneous = options?.excludeExtraneousValues || options?.strategy === 'excludeAll';
+  const exposeDefaultValues = options?.exposeDefaultValues !== false;
+  const exposeUnsetFields = options?.exposeUnsetFields !== false;
 
-  // 1. Map all properties and inject inline validation
   props.forEach((prop, idx) => {
     if (prop.exclude && prop.exclude.toClassOnly !== false) {
       return;
@@ -149,27 +158,22 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       bodyLines.push(`  }`);
     }
 
-    // Property assignment mapping
+    // Property mapping expression builder
+    let assignExpr = '';
     if (prop.transformFn) {
       const transformKey = `transform_${idx}`;
       context[transformKey] = prop.transformFn;
-      bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
-      bodyLines.push(`    inst['${targetKey}'] = ${transformKey}({ value: plain['${sourceKey}'], key: '${sourceKey}', obj: plain, type: 1 });`);
-      bodyLines.push(`  }`);
+      assignExpr = `${transformKey}({ value: plain['${sourceKey}'], key: '${sourceKey}', obj: plain, type: 1, options })`;
     } else if (prop.typeFn) {
-      // Circular-reference safe nested mapping using lazy class evaluation
       const typeKey = `type_${idx}`;
       context[typeKey] = prop.typeFn;
-      bodyLines.push(`  if (plain['${sourceKey}'] !== undefined && plain['${sourceKey}'] !== null) {`);
-      bodyLines.push(`    const subClass = ${typeKey}();`);
-      bodyLines.push(`    if (subClass) {`);
-      bodyLines.push(`      inst['${targetKey}'] = plainToInstance(subClass, plain['${sourceKey}'], options);`);
-      bodyLines.push(`    } else {`);
-      bodyLines.push(`      inst['${targetKey}'] = plain['${sourceKey}'];`);
-      bodyLines.push(`    }`);
-      bodyLines.push(`  } else {`);
-      bodyLines.push(`    inst['${targetKey}'] = plain['${sourceKey}'];`);
-      bodyLines.push(`  }`);
+      assignExpr = `(() => {
+        const subClass = ${typeKey}();
+        if (subClass) {
+          return plainToInstance(subClass, plain['${sourceKey}'], options, stack);
+        }
+        return plain['${sourceKey}'];
+      })()`;
     } else {
       let designType: any;
       if (typeof Reflect !== 'undefined' && typeof (Reflect as any).getMetadata === 'function') {
@@ -177,35 +181,55 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       }
 
       if (designType === Date) {
-        bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
-        bodyLines.push(`    const val = plain['${sourceKey}'];`);
-        bodyLines.push(`    inst['${targetKey}'] = val != null ? new Date(val) : val;`);
-        bodyLines.push(`  }`);
+        assignExpr = `plain['${sourceKey}'] != null ? new Date(plain['${sourceKey}']) : plain['${sourceKey}']`;
       } else if (designType && designType !== Object && designType !== Array && designType !== String && designType !== Number && designType !== Boolean) {
         const typeKey = `type_${idx}`;
         context[typeKey] = () => designType;
-        bodyLines.push(`  if (plain['${sourceKey}'] !== undefined && plain['${sourceKey}'] !== null) {`);
-        bodyLines.push(`    const subClass = ${typeKey}();`);
-        bodyLines.push(`    if (subClass) {`);
-        bodyLines.push(`      inst['${targetKey}'] = plainToInstance(subClass, plain['${sourceKey}'], options);`);
-        bodyLines.push(`    } else {`);
-        bodyLines.push(`      inst['${targetKey}'] = plain['${sourceKey}'];`);
-        bodyLines.push(`    }`);
-        bodyLines.push(`  } else {`);
-        bodyLines.push(`    inst['${targetKey}'] = plain['${sourceKey}'];`);
+        assignExpr = `(() => {
+          const subClass = ${typeKey}();
+          if (subClass) {
+            return plainToInstance(subClass, plain['${sourceKey}'], options, stack);
+          }
+          return plain['${sourceKey}'];
+        })()`;
+      } else {
+        assignExpr = `plain['${sourceKey}']`;
+      }
+    }
+
+    // Standard compliance property writer
+    if (exposeUnsetFields) {
+      if (exposeDefaultValues) {
+        bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
+        bodyLines.push(`    inst['${targetKey}'] = ${assignExpr};`);
+        bodyLines.push(`  } else if (inst['${targetKey}'] === undefined) {`);
+        bodyLines.push(`    inst['${targetKey}'] = undefined;`);
+        bodyLines.push(`  }`);
+      } else {
+        bodyLines.push(`  inst['${targetKey}'] = plain['${sourceKey}'] !== undefined ? ${assignExpr} : undefined;`);
+      }
+    } else {
+      if (exposeDefaultValues) {
+        bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
+        bodyLines.push(`    inst['${targetKey}'] = ${assignExpr};`);
         bodyLines.push(`  }`);
       } else {
         bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
-        bodyLines.push(`    inst['${targetKey}'] = plain['${sourceKey}'];`);
+        bodyLines.push(`    inst['${targetKey}'] = ${assignExpr};`);
+        bodyLines.push(`  } else {`);
+        bodyLines.push(`    delete inst['${targetKey}'];`);
         bodyLines.push(`  }`);
       }
     }
   });
 
-  // Throw validation errors if validation option was passed
   bodyLines.push(`  if (options && options.validate && errors.length > 0) {`);
   bodyLines.push(`    throw new FastValidationError(errors);`);
   bodyLines.push(`  }`);
+
+  if (options?.enableCircularCheck) {
+    bodyLines.push("stack.delete(plain);");
+  }
 
   bodyLines.push("return inst;");
 
@@ -213,7 +237,7 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
   const paramValues = Object.values(context);
   
   const functionBody = `
-    return function(plain, options) {
+    return function(plain, options, stack) {
       ${bodyLines.join('\n')}
     };
   `;
@@ -222,11 +246,11 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
   return factory(...paramValues);
 }
 
-function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransformOptions): (inst: T, options?: ClassTransformOptions) => Record<string, any> {
+function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransformOptions): (inst: T, options?: ClassTransformOptions, stack?: Set<any>) => Record<string, any> {
   const props = defaultMetadataStorage.getAncestorMetadata(cls);
 
   if (props.length === 0) {
-    return function (inst: any) {
+    return function (inst: any, options, stack) {
       if (inst == null) return inst;
       const plain: any = {};
       const keys = Object.keys(inst);
@@ -237,9 +261,9 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
           if (val instanceof Date) {
             plain[key] = val.toISOString();
           } else if (val.constructor && val.constructor !== Object && val.constructor !== Array) {
-            plain[key] = instanceToPlain(val, options);
+            plain[key] = instanceToPlain(val, options, stack);
           } else if (Array.isArray(val)) {
-            plain[key] = val.map(item => (item && item.constructor && item.constructor !== Object) ? instanceToPlain(item, options) : item);
+            plain[key] = val.map(item => (item && item.constructor && item.constructor !== Object) ? instanceToPlain(item, options, stack) : item);
           } else {
             plain[key] = val;
           }
@@ -253,6 +277,13 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
 
   const bodyLines: string[] = [];
   bodyLines.push("if (inst == null) return inst;");
+
+  if (options?.enableCircularCheck) {
+    bodyLines.push("if (stack && stack.has(inst)) return undefined;");
+    bodyLines.push("if (!stack) stack = new Set();");
+    bodyLines.push("stack.add(inst);");
+  }
+
   bodyLines.push("const plain = {};");
 
   const context: Record<string, any> = {
@@ -294,11 +325,11 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
       const transformKey = `transform_${idx}`;
       context[transformKey] = prop.transformFn;
       bodyLines.push(`  if (inst['${sourceKey}'] !== undefined) {`);
-      bodyLines.push(`    plain['${targetKey}'] = ${transformKey}({ value: inst['${sourceKey}'], key: '${sourceKey}', obj: inst, type: 2 });`);
+      bodyLines.push(`    plain['${targetKey}'] = ${transformKey}({ value: inst['${sourceKey}'], key: '${sourceKey}', obj: inst, type: 2, options });`);
       bodyLines.push(`  }`);
     } else if (prop.typeFn) {
       bodyLines.push(`  if (inst['${sourceKey}'] !== undefined) {`);
-      bodyLines.push(`    plain['${targetKey}'] = instanceToPlain(inst['${sourceKey}'], options);`);
+      bodyLines.push(`    plain['${targetKey}'] = instanceToPlain(inst['${sourceKey}'], options, stack);`);
       bodyLines.push(`  }`);
     } else {
       let designType: any;
@@ -316,9 +347,9 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
         bodyLines.push(`    const val = inst['${sourceKey}'];`);
         bodyLines.push(`    if (val != null && typeof val === 'object') {`);
         bodyLines.push(`      if (Array.isArray(val)) {`);
-        bodyLines.push(`        plain['${targetKey}'] = val.map(item => (item && item.constructor && item.constructor !== Object) ? instanceToPlain(item, options) : item);`);
+        bodyLines.push(`        plain['${targetKey}'] = val.map(item => (item && item.constructor && item.constructor !== Object) ? instanceToPlain(item, options, stack) : item);`);
         bodyLines.push(`      } else if (val.constructor && val.constructor !== Object) {`);
-        bodyLines.push(`        plain['${targetKey}'] = instanceToPlain(val, options);`);
+        bodyLines.push(`        plain['${targetKey}'] = instanceToPlain(val, options, stack);`);
         bodyLines.push(`      } else {`);
         bodyLines.push(`        plain['${targetKey}'] = val;`);
         bodyLines.push(`      }`);
@@ -330,13 +361,17 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
     }
   });
 
+  if (options?.enableCircularCheck) {
+    bodyLines.push("stack.delete(inst);");
+  }
+
   bodyLines.push("return plain;");
 
   const paramNames = Object.keys(context);
   const paramValues = Object.values(context);
   
   const functionBody = `
-    return function(inst, options) {
+    return function(inst, options, stack) {
       ${bodyLines.join('\n')}
     };
   `;
@@ -345,9 +380,9 @@ function buildJitSerializer<T>(cls: ClassConstructor<T>, options?: ClassTransfor
   return factory(...paramValues);
 }
 
-export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V[], options?: ClassTransformOptions): T[];
-export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V, options?: ClassTransformOptions): T;
-export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], options?: ClassTransformOptions): T | T[] {
+export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V[], options?: ClassTransformOptions, stack?: Set<any>): T[];
+export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V, options?: ClassTransformOptions, stack?: Set<any>): T;
+export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], options?: ClassTransformOptions, stack?: Set<any>): T | T[] {
   if (plain == null) return plain as any;
 
   if (Array.isArray(plain)) {
@@ -368,7 +403,7 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], 
     const len = plain.length;
     const result = new Array(len);
     for (let i = 0; i < len; i++) {
-      result[i] = mapper(plain[i], options);
+      result[i] = mapper(plain[i], options, stack);
     }
     return result;
   }
@@ -387,12 +422,12 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], 
     mapper = buildJitMapper(cls, options);
     mappers.set(key, mapper);
   }
-  return mapper(plain, options);
+  return mapper(plain, options, stack);
 }
 
-export function instanceToPlain<T>(instance: T[], options?: ClassTransformOptions): Record<string, any>[];
-export function instanceToPlain<T>(instance: T, options?: ClassTransformOptions): Record<string, any>;
-export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOptions): Record<string, any> | Record<string, any>[] {
+export function instanceToPlain<T>(instance: T[], options?: ClassTransformOptions, stack?: Set<any>): Record<string, any>[];
+export function instanceToPlain<T>(instance: T, options?: ClassTransformOptions, stack?: Set<any>): Record<string, any>;
+export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOptions, stack?: Set<any>): Record<string, any> | Record<string, any>[] {
   if (instance == null) return instance as any;
 
   if (Array.isArray(instance)) {
@@ -415,7 +450,7 @@ export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOp
     const len = instance.length;
     const result = new Array(len);
     for (let i = 0; i < len; i++) {
-      result[i] = serializer(instance[i], options);
+      result[i] = serializer(instance[i], options, stack);
     }
     return result;
   }
@@ -435,25 +470,25 @@ export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOp
     serializer = buildJitSerializer(cls, options);
     serializers.set(key, serializer);
   }
-  return serializer(instance, options);
+  return serializer(instance, options, stack);
 }
 
-export function instanceToInstance<T>(instance: T[], options?: ClassTransformOptions): T[];
-export function instanceToInstance<T>(instance: T, options?: ClassTransformOptions): T;
-export function instanceToInstance<T>(instance: T | T[], options?: ClassTransformOptions): T | T[] {
+export function instanceToInstance<T>(instance: T[], options?: ClassTransformOptions, stack?: Set<any>): T[];
+export function instanceToInstance<T>(instance: T, options?: ClassTransformOptions, stack?: Set<any>): T;
+export function instanceToInstance<T>(instance: T | T[], options?: ClassTransformOptions, stack?: Set<any>): T | T[] {
   if (instance == null) return instance as any;
 
   if (Array.isArray(instance)) {
     const len = instance.length;
     const result = new Array(len);
     for (let i = 0; i < len; i++) {
-      result[i] = instanceToInstance(instance[i], options);
+      result[i] = instanceToInstance(instance[i], options, stack);
     }
     return result as any;
   }
 
-  const plain = instanceToPlain(instance, options);
-  return plainToInstance(instance.constructor as ClassConstructor<T>, plain, options);
+  const plain = instanceToPlain(instance, options, stack);
+  return plainToInstance(instance.constructor as ClassConstructor<T>, plain, options, stack);
 }
 
 export class FastMapPipe {

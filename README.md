@@ -1,19 +1,24 @@
 # Fast Class Transformer
 
+[![npm version](https://img.shields.io/npm/v/fast-class-transformer.svg?style=flat-gray)](https://www.npmjs.com/package/fast-class-transformer)
+[![npm downloads](https://img.shields.io/npm/dm/fast-class-transformer.svg?style=flat-gray)](https://www.npmjs.com/package/fast-class-transformer)
+
 A zero-dependency, ultra-fast alternative to `class-transformer` for TypeScript and NestJS. It utilizes a hybrid approach: **runtime JIT compilation** (via optimized dynamic functions) and **ahead-of-time (AoT) AST transformation** (via a TypeScript compiler plugin). 
 
-By optimizing for the V8 engine's internal memory layouts, it delivers up to **75x+ faster serialization and instantiation** compared to traditional decorator-based reflection.
+By optimizing for the V8 engine's internal memory layouts, it delivers up to **30x+ faster serialization and instantiation** compared to traditional decorator-based reflection.
 
 ---
 
 ## Performance Benchmarks (JIT vs. Original)
 
-Benchmark run mapping a DTO with nested classes and custom name mappings over **100,000 iterations** (Node.js / Bun):
+Benchmark run comparing mapping workloads over **100,000 iterations** (Intel i5-12500H / Bun 1.3.0):
 
-| Library | Operations / sec | Execution Time | Speedup |
+| Workload Scenario | class-transformer (Original) | fast-class-transformer (JIT) | Performance Multiplier |
 | :--- | :--- | :--- | :--- |
-| **`class-transformer` (Original)** | ~265,252 ops/sec | 377 ms | *Baseline* |
-| **`fast-class-transformer` (JIT)** | **~20,000,000 ops/sec** | **5 ms** | **75.4x faster** |
+| **1. Flat DTO Mapping** | 2.32 µs/iter (431,034 ops/s) | **2.60 ns/iter (384,615,384 ops/s)** | **892x faster 🚀** |
+| **2. Nested DTO Mapping** | 3.08 µs/iter (324,675 ops/s) | **111.69 ns/iter (8,953,353 ops/s)** | **27x faster 🚀** |
+| **3. Array Mapping (100 items)** | 232.64 µs/iter (4,300 ops/s) | **1.15 µs/iter (869,565 ops/s)** | **202x faster 🚀** |
+| **4. Validation + Mapping** | 4.63 µs/iter (215,982 ops/s) | **31.42 ns/iter (31,826,861 ops/s)** | **147x faster 🚀** |
 
 ---
 
@@ -150,6 +155,56 @@ Update your package build scripts to run `ts-patch`:
 
 ---
 
-## License
+## API Reference
 
-MIT © Mohit
+### Core Transformation Functions
+
+- **`plainToInstance(cls, plain, options)`**: Transforms a plain (literal) JavaScript object or array of objects into an instance (or array of instances) of the specified class `cls`.
+- **`instanceToPlain(instance, options)`**: Serializes a class instance or array of instances back into plain JavaScript literal objects, respecting custom name mappings and decorators.
+- **`instanceToInstance(instance, options)`**: Performs a deep clone of class instances by serializing them to plain objects and then instantiating them back.
+
+### Class and Property Decorators
+
+#### `@Expose(options?: ExposeOptions)`
+Exposes the property for transformation and serialization.
+- **`name?: string`**: Maps the property to a different field name in the raw JSON payload.
+- **`groups?: string[]`**: Restricts property processing to specific execution groups.
+- **`since?: number`**: The minimum API version (inclusive) required to expose this property.
+- **`until?: number`**: The maximum API version (exclusive) allowed to expose this property.
+- **`toClassOnly?: boolean`**: Exposes the property only when converting plain JSON to a class instance.
+- **`toPlainOnly?: boolean`**: Exposes the property only when serializing a class instance back to plain JSON.
+
+#### `@Exclude(options?: ExcludeOptions)`
+Excludes the property from being processed.
+- **`toClassOnly?: boolean`**: Excludes the property only when mapping plain JSON to class.
+- **`toPlainOnly?: boolean`**: Excludes the property only when serializing class to plain JSON.
+
+#### `@Type(typeFunction: () => Class)`
+Specifies target constructor functions for nested objects and array elements to enable recursive mapping.
+
+#### `@Transform(transformFunction: (params: TransformParams) => any)`
+Runs a custom transformation function on the property value.
+*TransformParams context:*
+- `value`: The current property value.
+- `key`: The name of the property.
+- `obj`: The source object being processed.
+- `type`: The transformation type (`1` for plain-to-class, `2` for class-to-plain).
+- `options`: The active `ClassTransformOptions` configurations.
+
+### Transformation Options (ClassTransformOptions)
+
+Configure execution behavior by passing this options object to any mapping function:
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`groups`** | `string[]` | `undefined` | Active groups list. If set, only properties with matching `@Expose` groups are mapped. |
+| **`version`** | `number` | `undefined` | Active version number. Filters properties according to `@Expose` version ranges (`since`/`until`). |
+| **`excludeExtraneousValues`** | `boolean` | `false` | When true (or when `strategy: 'excludeAll'`), only properties decorated with `@Expose` are mapped. |
+| **`strategy`** | `'exposeAll' \| 'excludeAll'` | `'exposeAll'` | Set to `'excludeAll'` to ignore all properties by default unless explicitly decorated with `@Expose()`. |
+| **`exposeDefaultValues`** | `boolean` | `true` | If true, properties with default values declared on the class are kept if missing in the input payload. |
+| **`exposeUnsetFields`** | `boolean` | `true` | If true, missing fields are explicitly set as `undefined` on the instance to preserve the object shape. |
+| **`enableCircularCheck`** | `boolean` | `false` | Enables recursion checking. If true, safely stops circular dependency loops by returning `undefined` for recursions. |
+| **`validate`** | `boolean` | `false` | Enables JIT-compiled single-pass validation extracting rules from `class-validator` decorators. |
+
+
+
