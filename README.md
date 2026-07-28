@@ -15,10 +15,12 @@ Benchmark run comparing mapping workloads over **100,000 iterations** (Intel i5-
 
 | Workload Scenario | class-transformer (Original) | fast-class-transformer (JIT) | Performance Multiplier |
 | :--- | :--- | :--- | :--- |
-| **1. Flat DTO Mapping** | 2.32 µs/iter (431,034 ops/s) | **2.60 ns/iter (384,615,384 ops/s)** | **892x faster 🚀** |
-| **2. Nested DTO Mapping** | 3.08 µs/iter (324,675 ops/s) | **111.69 ns/iter (8,953,353 ops/s)** | **27x faster 🚀** |
-| **3. Array Mapping (100 items)** | 232.64 µs/iter (4,300 ops/s) | **1.15 µs/iter (869,565 ops/s)** | **202x faster 🚀** |
-| **4. Validation + Mapping** | 4.63 µs/iter (215,982 ops/s) | **31.42 ns/iter (31,826,861 ops/s)** | **147x faster 🚀** |
+| **1. Flat DTO Mapping** | 2.29 µs/iter | **17.08 ns/iter** | **134x faster 🚀** |
+| **2. Nested DTO Mapping** | 3.25 µs/iter | **53.53 ns/iter** | **60x faster 🚀** |
+| **3. Array Mapping (100 items)** | 228.78 µs/iter | **1.23 µs/iter** | **186x faster 🚀** |
+| **4. Validation + Mapping** | 2.97 µs/iter | **45.98 ns/iter** | **64x faster 🚀** |
+
+> **Benchmark Methodology**: Benchmarks were run using `mitata` on Bun 1.3.0 after JIT warmup. Mapping functions were pre-compiled to measure hot-path execution throughput rather than startup compilation latency. Outputs were passed to `do_not_optimize()` to mitigate V8 dead-code elimination, and inputs were rotated across 1,024 payload instances to prevent constant propagation.
 
 ---
 

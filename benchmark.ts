@@ -1,8 +1,8 @@
 import 'reflect-metadata';
-import { run, bench, group } from 'mitata';
+import { run, bench, group, do_not_optimize } from 'mitata';
 import { plainToInstance as origPlainToInstance, Expose as origExpose, Type as origType } from 'class-transformer';
 import { plainToInstance as fastPlainToInstance, Expose as fastExpose, Type as fastType } from './src';
-import { IsString, IsInt, Min, getMetadataStorage } from 'class-validator';
+import { IsString, IsInt, Min, validateSync } from 'class-validator';
 
 // ---------------------------------------------------------
 // 1. Flat DTO Definitions
@@ -78,49 +78,58 @@ class FastValidatedDto {
 
 const validatedPayload = { username: 'john_doe', age: 25 };
 
-// Warm up registries
+// Warm up registries & JIT compilation so startup compilation overhead isn't measured
 origPlainToInstance(OrigFlatDto, flatPayload);
 fastPlainToInstance(FastFlatDto, flatPayload);
 
-// Run the multi-parameter benchmarks
+origPlainToInstance(OrigNestedDto, nestedPayload);
+fastPlainToInstance(FastNestedDto, nestedPayload);
+
+origPlainToInstance(OrigFlatDto, arrayPayload);
+fastPlainToInstance(FastFlatDto, arrayPayload);
+
+origPlainToInstance(OrigValidatedDto, validatedPayload);
+validateSync(origPlainToInstance(OrigValidatedDto, validatedPayload));
+fastPlainToInstance(FastValidatedDto, validatedPayload, { validate: true });
+
+// Run the multi-parameter benchmarks with do_not_optimize to prevent DCE
 group('1. Flat DTO Mapping', () => {
   bench('class-transformer (Original)', () => {
-    origPlainToInstance(OrigFlatDto, flatPayload);
+    do_not_optimize(origPlainToInstance(OrigFlatDto, flatPayload));
   });
   bench('fast-class-transformer (JIT)', () => {
-    fastPlainToInstance(FastFlatDto, flatPayload);
+    do_not_optimize(fastPlainToInstance(FastFlatDto, flatPayload));
   });
 });
 
 group('2. Nested DTO Mapping', () => {
   bench('class-transformer (Original)', () => {
-    origPlainToInstance(OrigNestedDto, nestedPayload);
+    do_not_optimize(origPlainToInstance(OrigNestedDto, nestedPayload));
   });
   bench('fast-class-transformer (JIT)', () => {
-    fastPlainToInstance(FastNestedDto, nestedPayload);
+    do_not_optimize(fastPlainToInstance(FastNestedDto, nestedPayload));
   });
 });
 
 group('3. Array DTO Mapping (100 items)', () => {
   bench('class-transformer (Original)', () => {
-    origPlainToInstance(OrigFlatDto, arrayPayload);
+    do_not_optimize(origPlainToInstance(OrigFlatDto, arrayPayload));
   });
   bench('fast-class-transformer (JIT)', () => {
-    fastPlainToInstance(FastFlatDto, arrayPayload);
+    do_not_optimize(fastPlainToInstance(FastFlatDto, arrayPayload));
   });
 });
 
 group('4. Map + Validate Integration', () => {
   bench('class-transformer + class-validator (Original)', () => {
-    // Standard NestJS workflow: map then validate
-    const { validateSync } = require('class-validator');
     const obj = origPlainToInstance(OrigValidatedDto, validatedPayload);
-    validateSync(obj);
+    do_not_optimize(validateSync(obj));
   });
 
   bench('fast-class-transformer (JIT Single-Pass)', () => {
-    fastPlainToInstance(FastValidatedDto, validatedPayload, { validate: true });
+    do_not_optimize(fastPlainToInstance(FastValidatedDto, validatedPayload, { validate: true }));
   });
 });
 
 await run();
+
