@@ -21,8 +21,6 @@ class FastFlatDto {
   @fastExpose() role!: string;
 }
 
-const flatPayload = { id: 98765, username: 'dev_ops', email: 'dev@example.com', role: 'admin' };
-
 // ---------------------------------------------------------
 // 2. Nested DTO Definitions
 // ---------------------------------------------------------
@@ -45,13 +43,6 @@ class FastNestedDto {
   @fastExpose() @fastType(() => FastSubDto) sub!: FastSubDto;
   @fastExpose() createdAt!: Date;
 }
-
-const nestedPayload = {
-  id: 12345,
-  first_name: 'Johnathan',
-  sub: { value: 'Some nested text value' },
-  createdAt: '2026-07-23T20:40:00.000Z'
-};
 
 // ---------------------------------------------------------
 // 3. Array DTO (100 elements) Setup
@@ -76,38 +67,64 @@ class FastValidatedDto {
   @fastExpose() @IsInt() @Min(18) age!: number;
 }
 
-const validatedPayload = { username: 'john_doe', age: 25 };
+// Generate 1,024 rotated payload instances to prevent V8 constant propagation
+const flatPayloads = Array.from({ length: 1024 }, (_, i) => ({
+  id: 98765 + i,
+  username: `dev_ops_${i}`,
+  email: `dev_${i}@example.com`,
+  role: i % 2 === 0 ? 'admin' : 'user'
+}));
+
+const nestedPayloads = Array.from({ length: 1024 }, (_, i) => ({
+  id: 12345 + i,
+  first_name: `Johnathan_${i}`,
+  sub: { value: `Nested text value ${i}` },
+  createdAt: '2026-07-23T20:40:00.000Z'
+}));
+
+const validatedPayloads = Array.from({ length: 1024 }, (_, i) => ({
+  username: `john_doe_${i}`,
+  age: 18 + (i % 50)
+}));
+
+let flatIdx = 0;
+let nestedIdx = 0;
+let valIdx = 0;
 
 // Warm up registries & JIT compilation so startup compilation overhead isn't measured
-origPlainToInstance(OrigFlatDto, flatPayload);
-fastPlainToInstance(FastFlatDto, flatPayload);
+origPlainToInstance(OrigFlatDto, flatPayloads[0]);
+fastPlainToInstance(FastFlatDto, flatPayloads[0]);
 
-origPlainToInstance(OrigNestedDto, nestedPayload);
-fastPlainToInstance(FastNestedDto, nestedPayload);
+origPlainToInstance(OrigNestedDto, nestedPayloads[0]);
+fastPlainToInstance(FastNestedDto, nestedPayloads[0]);
 
 origPlainToInstance(OrigFlatDto, arrayPayload);
 fastPlainToInstance(FastFlatDto, arrayPayload);
 
-origPlainToInstance(OrigValidatedDto, validatedPayload);
-validateSync(origPlainToInstance(OrigValidatedDto, validatedPayload));
-fastPlainToInstance(FastValidatedDto, validatedPayload, { validate: true });
+origPlainToInstance(OrigValidatedDto, validatedPayloads[0]);
+validateSync(origPlainToInstance(OrigValidatedDto, validatedPayloads[0]));
+fastPlainToInstance(FastValidatedDto, validatedPayloads[0], { validate: true });
 
-// Run the multi-parameter benchmarks with do_not_optimize to prevent DCE
+// Run the multi-parameter benchmarks with do_not_optimize and payload rotation
 group('1. Flat DTO Mapping', () => {
   bench('class-transformer (Original)', () => {
-    do_not_optimize(origPlainToInstance(OrigFlatDto, flatPayload));
+    const payload = flatPayloads[(flatIdx++) & 1023];
+    do_not_optimize(origPlainToInstance(OrigFlatDto, payload));
   });
   bench('fast-class-transformer (JIT)', () => {
-    do_not_optimize(fastPlainToInstance(FastFlatDto, flatPayload));
+    const payload = flatPayloads[(flatIdx++) & 1023];
+    do_not_optimize(fastPlainToInstance(FastFlatDto, payload));
   });
 });
 
 group('2. Nested DTO Mapping', () => {
   bench('class-transformer (Original)', () => {
-    do_not_optimize(origPlainToInstance(OrigNestedDto, nestedPayload));
+    const payload = nestedPayloads[(nestedIdx++) & 1023];
+    do_not_optimize(origPlainToInstance(OrigNestedDto, payload));
   });
   bench('fast-class-transformer (JIT)', () => {
-    do_not_optimize(fastPlainToInstance(FastNestedDto, nestedPayload));
+    const payload = nestedPayloads[(nestedIdx++) & 1023];
+    do_not_optimize(fastPlainToInstance(FastNestedDto, payload));
   });
 });
 
@@ -122,14 +139,15 @@ group('3. Array DTO Mapping (100 items)', () => {
 
 group('4. Map + Validate Integration', () => {
   bench('class-transformer + class-validator (Original)', () => {
-    const obj = origPlainToInstance(OrigValidatedDto, validatedPayload);
+    const payload = validatedPayloads[(valIdx++) & 1023];
+    const obj = origPlainToInstance(OrigValidatedDto, payload);
     do_not_optimize(validateSync(obj));
   });
 
   bench('fast-class-transformer (JIT Single-Pass)', () => {
-    do_not_optimize(fastPlainToInstance(FastValidatedDto, validatedPayload, { validate: true }));
+    const payload = validatedPayloads[(valIdx++) & 1023];
+    do_not_optimize(fastPlainToInstance(FastValidatedDto, payload, { validate: true }));
   });
 });
 
 await run();
-
