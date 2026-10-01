@@ -28,6 +28,7 @@
   "scripts": {
     "prepublishOnly": "bun run build && bun test",
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "bun test",
     "benchmark": "bun run benchmark.ts",
     "benchmark:nestjs": "bun run benchmark-nestjs.ts"
