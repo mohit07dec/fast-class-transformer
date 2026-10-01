@@ -1,55 +1,114 @@
-# Fast Class Transformer
+# fast-class-transformer
 
-[![npm version](https://img.shields.io/npm/v/fast-class-transformer.svg?style=flat-gray)](https://www.npmjs.com/package/fast-class-transformer)
-[![npm downloads](https://img.shields.io/npm/dm/fast-class-transformer.svg?style=flat-gray)](https://www.npmjs.com/package/fast-class-transformer)
+[![CI](https://github.com/mohit07dec/fast-class-transformer/actions/workflows/ci.yml/badge.svg)](https://github.com/mohit07dec/fast-class-transformer/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/fast-class-transformer.svg)](https://www.npmjs.com/package/fast-class-transformer)
+[![npm downloads](https://img.shields.io/npm/dm/fast-class-transformer.svg)](https://www.npmjs.com/package/fast-class-transformer)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A zero-dependency, ultra-fast alternative to `class-transformer` for TypeScript and NestJS. It utilizes a hybrid approach: **runtime JIT compilation** (via optimized dynamic functions) and **ahead-of-time (AoT) AST transformation** (via a TypeScript compiler plugin). 
+A zero-dependency, ultra-fast alternative to [`class-transformer`](https://github.com/typestack/class-transformer) for TypeScript and NestJS.
 
-By optimizing for the V8 engine's internal memory layouts, it delivers up to **30x+ faster serialization and instantiation** compared to traditional decorator-based reflection.
+`fast-class-transformer` uses a **JIT compilation** approach: on first use of a class, it compiles a dedicated, statically shaped mapping function for that class and caches it. All subsequent calls use the cached function at near-native JavaScript speed. This avoids the per-request reflection and metadata traversal that makes `class-transformer` slow.
+
+## Table of contents
+
+- [Performance](#performance)
+- [Why is it fast?](#why-is-it-fast)
+- [Installation](#installation)
+- [Drop-in replacement for class-transformer](#drop-in-replacement-for-class-transformer)
+  - [plainToInstance](#plaintoinstance)
+  - [instanceToPlain](#instancetoplain)
+  - [instanceToInstance](#instancetoinstance)
+- [Decorators](#decorators)
+  - [@Expose](#expose)
+  - [@Exclude](#exclude)
+  - [@Type](#type)
+  - [@Transform](#transform)
+- [Transformation options](#transformation-options)
+- [NestJS integration](#nestjs-integration)
+  - [FastValidationPipe (global drop-in)](#fastvalidationpipe-global-drop-in)
+  - [@FastMap (endpoint-level)](#fastmap-endpoint-level)
+- [Ahead-of-Time (AOT) compiler plugin](#ahead-of-time-aot-compiler-plugin)
+- [Samples](#samples)
 
 ---
 
-## Performance Benchmarks (JIT vs. Original)
+## Performance
 
-Benchmark run comparing mapping workloads over **100,000 iterations** (Intel i5-12500H / Bun 1.3.0):
+Benchmarks run using [`mitata`](https://github.com/evanwashere/mitata) on Bun 1.3.0 (Intel i5-12500H), 100,000 iterations, JIT-warmed, `do_not_optimize` applied, 1,024 payload instances rotated to prevent constant propagation:
 
-| Workload Scenario | class-transformer (Original) | fast-class-transformer (JIT) | Performance Multiplier |
-| :--- | :--- | :--- | :--- |
-| **1. Flat DTO Mapping** | 2.29 µs/iter | **17.08 ns/iter** | **134x faster 🚀** |
-| **2. Nested DTO Mapping** | 3.25 µs/iter | **53.53 ns/iter** | **60x faster 🚀** |
-| **3. Array Mapping (100 items)** | 228.78 µs/iter | **1.23 µs/iter** | **186x faster 🚀** |
-| **4. Validation + Mapping** | 2.97 µs/iter | **45.98 ns/iter** | **64x faster 🚀** |
-| **5. NestJS ValidationPipe** | 6.53 µs/iter | **365.15 ns/iter** | **18x faster 🚀** |
-
-> **Benchmark Methodology**: Benchmarks were run using `mitata` on Bun 1.3.0 after JIT warmup. Mapping functions were pre-compiled to measure hot-path execution throughput rather than startup compilation latency. Outputs were passed to `do_not_optimize()` to mitigate V8 dead-code elimination, and inputs were rotated across 1,024 payload instances to prevent constant propagation.
+| Workload | class-transformer | fast-class-transformer | Speedup |
+| :--- | ---: | ---: | ---: |
+| Flat DTO mapping | 2.29 µs/iter | 17.08 ns/iter | **134x** |
+| Nested DTO mapping | 3.25 µs/iter | 53.53 ns/iter | **60x** |
+| Array mapping (100 items) | 228.78 µs/iter | 1.23 µs/iter | **186x** |
+| Validation + mapping | 2.97 µs/iter | 45.98 ns/iter | **64x** |
+| NestJS ValidationPipe | 6.53 µs/iter | 365.15 ns/iter | **18x** |
 
 ---
 
-## Why is it so fast?
+## Why is it fast?
 
-1. **V8 Hidden Classes (Shapes) Optimization**: The V8 engine optimizes object property access by creating "Hidden Classes" behind the scenes when properties are assigned in a fixed order. Original `class-transformer` assigns properties dynamically (`inst[key] = value` inside `for...in` loops), which degrades objects to slow dictionary/hashmap lookup mode. `fast-class-transformer` compiles a dedicated, inline property-assignment function (`inst.prop = value`) for each DTO shape, maintaining V8's Hidden Class optimizations.
-2. **Zero Runtime Reflection**: Instead of recursively traversing metadata arrays, querying target decorators, and resolving groups on *every single request*, our JIT compiler evaluates decorators *once* at startup, generates a static JavaScript mapping function, caches it, and uses it for all subsequent operations.
-3. **Monomorphic Inline Caches (ICs)**: Original `class-transformer` uses a generic, monolithic transformation routine that handles all DTO types, turning it into a "megamorphic" function which destroys V8 caches. We generate independent, monomorphic mapping functions for each DTO type.
-4. **Garbage Collection Optimization**: We completely avoid allocating temporary metadata arrays, mapping closures, or helper objects on the hot path, drastically reducing memory pressure and GC pauses.
+**1. V8 hidden class optimization.**
+V8 internally creates "hidden classes" (shapes) to optimize property access on objects. `class-transformer` assigns properties inside `for...in` loops with dynamic string keys (`inst[key] = value`), which degrades instances to slow dictionary mode. `fast-class-transformer` compiles a dedicated function per DTO that assigns properties in a fixed, declared order (`inst.prop = value`), preserving V8's hidden class optimizations.
+
+**2. Zero runtime reflection.**
+Standard `class-transformer` traverses metadata arrays and resolves decorator configurations on every request. `fast-class-transformer` evaluates decorators once at JIT compile time, generates a static JavaScript function, and caches it. All subsequent calls execute that compiled function directly.
+
+**3. Monomorphic inline caches.**
+`class-transformer` routes all DTO types through a single generic transformer function, which becomes megamorphic and kills V8's inline caches. Each class gets its own independently compiled, monomorphic function here.
+
+**4. No allocations on the hot path.**
+Temporary metadata arrays, mapping closures, and helper objects are not allocated per-request — they are computed once during JIT compilation and closed over.
 
 ---
 
 ## Installation
 
 ```bash
-bun add fast-class-transformer
+npm install fast-class-transformer reflect-metadata
+```
+
+```bash
+bun add fast-class-transformer reflect-metadata
+```
+
+Add to your application entry point (e.g., `main.ts`):
+
+```typescript
+import 'reflect-metadata';
+```
+
+And set the following in your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
 ```
 
 ---
 
-## Usage
+## Drop-in replacement for class-transformer
 
-### 1. Drop-In Replacement for `class-transformer`
-
-Simply change your imports! We support the standard class-transformer decorator signatures:
+Change your imports and everything works:
 
 ```typescript
-import { Expose, Exclude, Type, Transform, plainToInstance, instanceToPlain } from 'fast-class-transformer';
+// Before
+import { plainToInstance, instanceToPlain, Expose, Type } from 'class-transformer';
+
+// After
+import { plainToInstance, instanceToPlain, Expose, Type } from 'fast-class-transformer';
+```
+
+### plainToInstance
+
+Transforms a plain JavaScript object into a class instance. Respects `@Expose`, `@Exclude`, `@Type`, and `@Transform` decorators. Supports arrays.
+
+```typescript
+import { plainToInstance, Expose, Type, Transform } from 'fast-class-transformer';
 
 class Profile {
   @Expose()
@@ -67,50 +126,241 @@ class User {
   firstName: string;
 
   @Exclude()
-  password?: string;
+  password: string;
 
   @Expose()
   @Type(() => Profile)
   profile: Profile;
 
   @Expose()
-  createdAt: Date;
-
-  @Expose()
   @Transform(({ value }) => value.toUpperCase())
   role: string;
 }
 
-// 1. Plain to Instance
-const rawJson = {
+const raw = {
   id: 42,
-  first_name: 'John Doe',
-  password: 'secret_password',
+  first_name: 'Jane',
+  password: 'secret',
   profile: { bio: 'Engineer', avatar: 'avatar.png' },
-  createdAt: '2026-07-23T20:00:00.000Z',
-  role: 'admin'
+  role: 'admin',
 };
 
-const user = plainToInstance(User, rawJson);
-console.log(user instanceof User); // true
-console.log(user.firstName); // "John Doe"
-console.log(user.role); // "ADMIN" (transformed)
+const user = plainToInstance(User, raw);
 
-// 2. Instance to Plain
+console.log(user instanceof User);        // true
+console.log(user instanceof Profile);     // false — profile is nested
+console.log(user.profile instanceof Profile); // true
+console.log(user.firstName);             // 'Jane'
+console.log(user.role);                  // 'ADMIN'
+console.log(user.password);             // undefined — excluded
+```
+
+To transform an array:
+
+```typescript
+const users = plainToInstance(User, [raw1, raw2, raw3]);
+// returns User[]
+```
+
+### instanceToPlain
+
+Serializes a class instance back to a plain object, respecting `name` aliases and decorator configuration.
+
+```typescript
+import { instanceToPlain } from 'fast-class-transformer';
+
 const plain = instanceToPlain(user);
-console.log(plain.first_name); // "John Doe" (mapped back to custom serialize name)
+
+console.log(plain.first_name); // 'Jane'  — mapped back from firstName
+console.log(plain.password);   // undefined — excluded
+console.log(plain.role);       // 'ADMIN'
+```
+
+### instanceToInstance
+
+Deep-clones a class instance by serializing it to a plain object and re-instantiating it.
+
+```typescript
+import { instanceToInstance } from 'fast-class-transformer';
+
+const clone = instanceToInstance(user);
+
+console.log(clone instanceof User); // true
+console.log(clone === user);        // false — independent deep copy
 ```
 
 ---
 
-## NestJS Integration
+## Decorators
 
-### 1. Zero-Migration Global Drop-In Replacement (`FastValidationPipe`)
+### @Expose
 
-Replace NestJS's default `ValidationPipe` globally in your `main.ts` with **`FastValidationPipe`**. It provides a **1-line, zero-migration drop-in** that speeds up your HTTP ingestion pipeline by up to **18x**:
+Marks a property for inclusion during transformation and serialization. When `strategy: 'excludeAll'` is set (or `excludeExtraneousValues: true`), only `@Expose()`-decorated properties are processed.
 
 ```typescript
-// main.ts
+class User {
+  @Expose()
+  id: number;
+
+  @Expose({ name: 'first_name' })
+  firstName: string;
+
+  @Expose({ groups: ['admin'] })
+  internalNote: string;
+
+  @Expose({ since: 2, until: 4 })
+  betaFeature: string;
+
+  @Expose({ toClassOnly: true })
+  inputOnly: string;
+
+  @Expose({ toPlainOnly: true })
+  outputOnly: string;
+}
+```
+
+| Option | Type | Description |
+| :--- | :--- | :--- |
+| `name` | `string` | Maps to/from a different field name in the raw payload. |
+| `groups` | `string[]` | Only process this property when these groups are active. |
+| `since` | `number` | Minimum API version (inclusive) for this property to be included. |
+| `until` | `number` | Maximum API version (exclusive) for this property to be included. |
+| `toClassOnly` | `boolean` | Only applied when converting plain to class (not serializing). |
+| `toPlainOnly` | `boolean` | Only applied when serializing class to plain (not deserializing). |
+
+### @Exclude
+
+Prevents a property from being included in transformations.
+
+```typescript
+class User {
+  @Expose()
+  email: string;
+
+  @Exclude()
+  passwordHash: string;
+
+  @Exclude({ toPlainOnly: true })
+  internalId: string; // available in class, excluded when serialized
+}
+```
+
+| Option | Type | Description |
+| :--- | :--- | :--- |
+| `toClassOnly` | `boolean` | Exclude only when mapping plain to class. |
+| `toPlainOnly` | `boolean` | Exclude only when serializing class to plain. |
+
+### @Type
+
+Specifies the constructor to use when mapping nested objects or array elements. Required for nested class mapping to work correctly.
+
+```typescript
+import { Expose, Type } from 'fast-class-transformer';
+
+class Address {
+  @Expose() street: string;
+  @Expose() city: string;
+}
+
+class Order {
+  @Expose() id: number;
+
+  @Expose()
+  @Type(() => Address)
+  shippingAddress: Address;
+
+  @Expose()
+  @Type(() => Address)
+  billingAddresses: Address[]; // arrays are handled automatically
+}
+```
+
+Primitive constructors (`Number`, `String`, `Boolean`) are also supported for type coercion:
+
+```typescript
+class CreateCatDto {
+  @Expose()
+  @Type(() => Number)
+  age: number; // coerces '42' (string from query param) → 42 (number)
+}
+```
+
+### @Transform
+
+Runs a custom function on the property value during transformation.
+
+```typescript
+import { Expose, Transform } from 'fast-class-transformer';
+
+class Article {
+  @Expose()
+  @Transform(({ value }) => value.trim().toLowerCase())
+  slug: string;
+
+  @Expose()
+  @Transform(({ value, obj }) => `${obj.baseUrl}/${value}`)
+  coverImageUrl: string;
+
+  @Expose()
+  @Transform(({ value, type }) => {
+    // type: 1 = plainToInstance, 2 = instanceToPlain
+    return type === 1 ? new Date(value) : value.toISOString();
+  })
+  publishedAt: Date;
+}
+```
+
+The transform function receives a `TransformParams` object:
+
+| Property | Description |
+| :--- | :--- |
+| `value` | The current value of the property. |
+| `key` | The property name. |
+| `obj` | The source object being processed. |
+| `type` | `1` for plainToInstance, `2` for instanceToPlain. |
+| `options` | The active `ClassTransformOptions` passed to the call. |
+
+---
+
+## Transformation options
+
+All transformation functions (`plainToInstance`, `instanceToPlain`, `instanceToInstance`) accept an options object as the third argument:
+
+```typescript
+plainToInstance(User, raw, {
+  excludeExtraneousValues: true,
+  groups: ['admin'],
+  version: 3,
+});
+```
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `groups` | `string[]` | `undefined` | Active transformation groups. Only properties with matching `@Expose` groups are processed. |
+| `version` | `number` | `undefined` | Active version. Filters properties by `since`/`until` version constraints. |
+| `excludeExtraneousValues` | `boolean` | `false` | When `true`, only `@Expose()`-decorated properties are mapped. Equivalent to `strategy: 'excludeAll'`. |
+| `strategy` | `'exposeAll' \| 'excludeAll'` | `'exposeAll'` | `'excludeAll'` ignores all properties unless explicitly decorated with `@Expose()`. |
+| `exposeDefaultValues` | `boolean` | `true` | Preserves class-declared default values when the input payload is missing those fields. |
+| `exposeUnsetFields` | `boolean` | `true` | Sets missing fields explicitly to `undefined` on the instance to preserve the object shape. |
+| `enableCircularCheck` | `boolean` | `false` | Detects circular references and returns `undefined` instead of throwing a stack overflow. |
+| `validate` | `boolean` | `false` | Enables single-pass JIT validation using `class-validator` decorator rules during `plainToInstance`. |
+
+---
+
+## NestJS integration
+
+`fast-class-transformer` ships a `FastValidationPipe` as an optional subpath export. It does not depend on `@nestjs/common` at the package level — standalone users never bundle NestJS.
+
+```bash
+# @nestjs/common and class-validator are peer dependencies — install them if not already present
+npm install @nestjs/common class-validator
+```
+
+### FastValidationPipe (global drop-in)
+
+Replace NestJS's `ValidationPipe` in `main.ts` with one line:
+
+```typescript
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { FastValidationPipe } from 'fast-class-transformer/nestjs';
@@ -118,7 +368,6 @@ import { FastValidationPipe } from 'fast-class-transformer/nestjs';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // 🚀 1-line drop-in replacement for NestJS ValidationPipe:
   app.useGlobalPipes(
     new FastValidationPipe({
       transform: true,
@@ -132,26 +381,37 @@ async function bootstrap() {
 bootstrap();
 ```
 
-#### Why `FastValidationPipe`?
-- **Zero Migration**: Existing DTOs work unchanged with standard `class-validator` annotations (`@IsString()`, `@IsInt()`, `@Min()`, etc.) and `class-transformer` annotations (`@Type()`, `@Expose()`).
-- **Single-Pass JIT Execution**: Merges property mapping, primitive type coercion, and validation constraint evaluation into a single optimized function pass.
-- **Subpath Export**: Standalone non-NestJS users never bundle `@nestjs/common` or NestJS dependencies.
-- **Zero Build Plugins Required**: Works out of the box with standard `tsc`, `ts-node`, `esbuild`, `swc`, `bun`, or `vite`.
+Existing DTOs with `class-validator` annotations work unchanged — no `@Expose()` required:
 
-#### `FastValidationPipeOptions`
+```typescript
+import { IsString, IsInt, Min, IsEmail } from 'class-validator';
+
+// This DTO works with FastValidationPipe as-is.
+// No @Expose() decorators needed.
+export class CreateUserDto {
+  @IsString()
+  name: string;
+
+  @IsEmail()
+  email: string;
+
+  @IsInt()
+  @Min(0)
+  age: number;
+}
+```
+
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| **`transform`** | `boolean` | `true` | Automatically transform payloads to class instances. |
-| **`whitelist`** | `boolean` | `false` | Strip properties that do not have decorators on the DTO. |
-| **`forbidNonWhitelisted`** | `boolean` | `false` | Throw `BadRequestException` when unwhitelisted properties are received. |
-| **`groups`** | `string[]` | `undefined` | Active validation and transformation groups. |
-| **`exceptionFactory`** | `(errors: any[]) => any` | `BadRequestException` | Custom exception factory to format HTTP error responses. |
+| `transform` | `boolean` | `true` | Coerce incoming values to their declared types before validation. |
+| `whitelist` | `boolean` | `false` | Strip properties not declared in the DTO. |
+| `forbidNonWhitelisted` | `boolean` | `false` | Throw `BadRequestException` when undeclared properties are received. |
+| `groups` | `string[]` | `undefined` | Active validation groups. |
+| `exceptionFactory` | `(errors: any[]) => any` | `BadRequestException` | Custom factory for formatting validation error responses. |
 
----
+### @FastMap (endpoint-level)
 
-### 2. Endpoint-Level Route Binding (`@FastMap`)
-
-To optimize specific controller endpoints individually without registering a global pipe:
+To optimize a specific endpoint without a global pipe:
 
 ```typescript
 import { Controller, Post } from '@nestjs/common';
@@ -162,7 +422,6 @@ import { CreateUserDto } from './create-user.dto';
 export class UsersController {
   @Post()
   async create(@FastMap() createUserDto: CreateUserDto) {
-    // Payload is compiled, validated, and instantiated in a single JIT pass!
     return this.usersService.create(createUserDto);
   }
 }
@@ -170,17 +429,17 @@ export class UsersController {
 
 ---
 
-## Ahead-of-Time (AOT) AST Transformer Setup
+## Ahead-of-Time (AOT) compiler plugin
 
-If you want compilation-time code generation for zero-overhead execution (often yielding up to **100x–200x** speedups), set up our custom compiler plugin:
+For compile-time code generation — which produces the mapping functions at build time rather than first request — configure the TypeScript compiler plugin:
 
-### 1. Install compiler patch dependencies
+1. Install `ts-patch`:
+
 ```bash
-bun add -d ts-patch
+npm install -D ts-patch
 ```
 
-### 2. Configure `tsconfig.json`
-Add the plugin to your compiler options:
+2. Add to `tsconfig.json`:
 
 ```json
 {
@@ -192,68 +451,23 @@ Add the plugin to your compiler options:
 }
 ```
 
-### 3. Build/Run your project using `ts-patch`
-Update your package build scripts to run `ts-patch`:
+3. Update build scripts:
 
 ```json
-"scripts": {
-  "build": "ts-patch build",
-  "start:dev": "ts-patch ts-node-dev src/main.ts"
+{
+  "scripts": {
+    "build": "ts-patch build",
+    "start:dev": "ts-patch ts-node-dev src/main.ts"
+  }
 }
 ```
 
 ---
 
-## API Reference
+## Samples
 
-### Core Transformation Functions
+- [Benchmark source — flat/nested/array mapping](https://github.com/mohit07dec/fast-class-transformer/blob/main/benchmark.ts)
+- [NestJS ValidationPipe benchmark](https://github.com/mohit07dec/fast-class-transformer/blob/main/benchmark-nestjs.ts)
+- [Test suite](https://github.com/mohit07dec/fast-class-transformer/tree/main/tests)
 
-- **`plainToInstance(cls, plain, options)`**: Transforms a plain (literal) JavaScript object or array of objects into an instance (or array of instances) of the specified class `cls`.
-- **`instanceToPlain(instance, options)`**: Serializes a class instance or array of instances back into plain JavaScript literal objects, respecting custom name mappings and decorators.
-- **`instanceToInstance(instance, options)`**: Performs a deep clone of class instances by serializing them to plain objects and then instantiating them back.
-
-### Class and Property Decorators
-
-#### `@Expose(options?: ExposeOptions)`
-Exposes the property for transformation and serialization.
-- **`name?: string`**: Maps the property to a different field name in the raw JSON payload.
-- **`groups?: string[]`**: Restricts property processing to specific execution groups.
-- **`since?: number`**: The minimum API version (inclusive) required to expose this property.
-- **`until?: number`**: The maximum API version (exclusive) allowed to expose this property.
-- **`toClassOnly?: boolean`**: Exposes the property only when converting plain JSON to a class instance.
-- **`toPlainOnly?: boolean`**: Exposes the property only when serializing a class instance back to plain JSON.
-
-#### `@Exclude(options?: ExcludeOptions)`
-Excludes the property from being processed.
-- **`toClassOnly?: boolean`**: Excludes the property only when mapping plain JSON to class.
-- **`toPlainOnly?: boolean`**: Excludes the property only when serializing class to plain JSON.
-
-#### `@Type(typeFunction: () => Class)`
-Specifies target constructor functions for nested objects and array elements to enable recursive mapping.
-
-#### `@Transform(transformFunction: (params: TransformParams) => any)`
-Runs a custom transformation function on the property value.
-*TransformParams context:*
-- `value`: The current property value.
-- `key`: The name of the property.
-- `obj`: The source object being processed.
-- `type`: The transformation type (`1` for plain-to-class, `2` for class-to-plain).
-- `options`: The active `ClassTransformOptions` configurations.
-
-### Transformation Options (ClassTransformOptions)
-
-Configure execution behavior by passing this options object to any mapping function:
-
-| Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **`groups`** | `string[]` | `undefined` | Active groups list. If set, only properties with matching `@Expose` groups are mapped. |
-| **`version`** | `number` | `undefined` | Active version number. Filters properties according to `@Expose` version ranges (`since`/`until`). |
-| **`excludeExtraneousValues`** | `boolean` | `false` | When true (or when `strategy: 'excludeAll'`), only properties decorated with `@Expose` are mapped. |
-| **`strategy`** | `'exposeAll' \| 'excludeAll'` | `'exposeAll'` | Set to `'excludeAll'` to ignore all properties by default unless explicitly decorated with `@Expose()`. |
-| **`exposeDefaultValues`** | `boolean` | `true` | If true, properties with default values declared on the class are kept if missing in the input payload. |
-| **`exposeUnsetFields`** | `boolean` | `true` | If true, missing fields are explicitly set as `undefined` on the instance to preserve the object shape. |
-| **`enableCircularCheck`** | `boolean` | `false` | Enables recursion checking. If true, safely stops circular dependency loops by returning `undefined` for recursions. |
-| **`validate`** | `boolean` | `false` | Enables JIT-compiled single-pass validation extracting rules from `class-validator` decorators. |
-
-
-
+A full NestJS example application is [planned](https://github.com/mohit07dec/fast-class-transformer/issues) — contributions welcome.
