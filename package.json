@@ -1,6 +1,6 @@
 {
   "name": "fast-class-transformer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A zero-dependency, ahead-of-time (AoT) compiled, ultra-fast alternative to class-transformer for TypeScript and NestJS.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
