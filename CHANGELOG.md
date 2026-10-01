@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] — 2026-10-02
+
+### Changed
+- Complete documentation overhaul: structured Table of Contents, in-depth decorator guides, and clean right-aligned benchmark tables.
+- Added comprehensive `CONTRIBUTING.md` guide and project structure overview.
+- Added `typecheck` verification script (`tsc --noEmit`) to `package.json` and CI workflow.
+
 ## [1.1.0] — 2026-10-02
 
 ### Added
