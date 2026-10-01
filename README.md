@@ -19,6 +19,7 @@ Benchmark run comparing mapping workloads over **100,000 iterations** (Intel i5-
 | **2. Nested DTO Mapping** | 3.25 µs/iter | **53.53 ns/iter** | **60x faster 🚀** |
 | **3. Array Mapping (100 items)** | 228.78 µs/iter | **1.23 µs/iter** | **186x faster 🚀** |
 | **4. Validation + Mapping** | 2.97 µs/iter | **45.98 ns/iter** | **64x faster 🚀** |
+| **5. NestJS ValidationPipe** | 6.53 µs/iter | **365.15 ns/iter** | **18x faster 🚀** |
 
 > **Benchmark Methodology**: Benchmarks were run using `mitata` on Bun 1.3.0 after JIT warmup. Mapping functions were pre-compiled to measure hot-path execution throughput rather than startup compilation latency. Outputs were passed to `do_not_optimize()` to mitigate V8 dead-code elimination, and inputs were rotated across 1,024 payload instances to prevent constant propagation.
 
@@ -102,9 +103,55 @@ console.log(plain.first_name); // "John Doe" (mapped back to custom serialize na
 
 ---
 
-## NestJS Integration (`@FastMap`)
+## NestJS Integration
 
-To bypass the reflection overhead of the global `ValidationPipe`, use the `@FastMap()` decorator on your controller endpoints.
+### 1. Zero-Migration Global Drop-In Replacement (`FastValidationPipe`)
+
+Replace NestJS's default `ValidationPipe` globally in your `main.ts` with **`FastValidationPipe`**. It provides a **1-line, zero-migration drop-in** that speeds up your HTTP ingestion pipeline by up to **18x**:
+
+```typescript
+// main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { FastValidationPipe } from 'fast-class-transformer/nestjs';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // 🚀 1-line drop-in replacement for NestJS ValidationPipe:
+  app.useGlobalPipes(
+    new FastValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    })
+  );
+
+  await app.listen(3000);
+}
+bootstrap();
+```
+
+#### Why `FastValidationPipe`?
+- **Zero Migration**: Existing DTOs work unchanged with standard `class-validator` annotations (`@IsString()`, `@IsInt()`, `@Min()`, etc.) and `class-transformer` annotations (`@Type()`, `@Expose()`).
+- **Single-Pass JIT Execution**: Merges property mapping, primitive type coercion, and validation constraint evaluation into a single optimized function pass.
+- **Subpath Export**: Standalone non-NestJS users never bundle `@nestjs/common` or NestJS dependencies.
+- **Zero Build Plugins Required**: Works out of the box with standard `tsc`, `ts-node`, `esbuild`, `swc`, `bun`, or `vite`.
+
+#### `FastValidationPipeOptions`
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`transform`** | `boolean` | `true` | Automatically transform payloads to class instances. |
+| **`whitelist`** | `boolean` | `false` | Strip properties that do not have decorators on the DTO. |
+| **`forbidNonWhitelisted`** | `boolean` | `false` | Throw `BadRequestException` when unwhitelisted properties are received. |
+| **`groups`** | `string[]` | `undefined` | Active validation and transformation groups. |
+| **`exceptionFactory`** | `(errors: any[]) => any` | `BadRequestException` | Custom exception factory to format HTTP error responses. |
+
+---
+
+### 2. Endpoint-Level Route Binding (`@FastMap`)
+
+To optimize specific controller endpoints individually without registering a global pipe:
 
 ```typescript
 import { Controller, Post } from '@nestjs/common';
@@ -115,7 +162,7 @@ import { CreateUserDto } from './create-user.dto';
 export class UsersController {
   @Post()
   async create(@FastMap() createUserDto: CreateUserDto) {
-    // Payload is already compiled, sanitized, and instantiated!
+    // Payload is compiled, validated, and instantiated in a single JIT pass!
     return this.usersService.create(createUserDto);
   }
 }

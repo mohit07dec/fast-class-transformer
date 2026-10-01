@@ -4,6 +4,8 @@ export type ClassConstructor<T> = new (...args: any[]) => T;
 
 export interface ClassTransformOptions {
   excludeExtraneousValues?: boolean;
+  whitelist?: boolean;
+  forbidNonWhitelisted?: boolean;
   groups?: string[];
   version?: number;
   exposeDefaultValues?: boolean;
@@ -11,6 +13,7 @@ export interface ClassTransformOptions {
   strategy?: 'excludeAll' | 'exposeAll';
   enableCircularCheck?: boolean;
   validate?: boolean; // Enable single-pass compiled validation
+  stopAtFirstError?: boolean;
 }
 
 export class FastValidationError extends Error {
@@ -28,6 +31,8 @@ function getCacheKey(options?: ClassTransformOptions): string {
   if (options.groups) parts.push(`g:${options.groups.slice().sort().join(',')}`);
   if (options.version !== undefined) parts.push(`v:${options.version}`);
   if (options.excludeExtraneousValues) parts.push(`ee:1`);
+  if (options.whitelist) parts.push(`wl:1`);
+  if (options.forbidNonWhitelisted) parts.push(`fnw:1`);
   if (options.exposeDefaultValues !== undefined) parts.push(`ed:${options.exposeDefaultValues ? 1 : 0}`);
   if (options.exposeUnsetFields !== undefined) parts.push(`eu:${options.exposeUnsetFields ? 1 : 0}`);
   if (options.strategy) parts.push(`s:${options.strategy}`);
@@ -36,36 +41,36 @@ function getCacheKey(options?: ClassTransformOptions): string {
   return parts.length ? parts.join('|') : 'default';
 }
 
-const validatorGen: Record<string, (sourceKey: string, targetKey: string, constraints: any[]) => string> = {
-  isString: (src, tgt) => `if (typeof plain['${src}'] !== 'string') {
-    errors.push({ property: '${tgt}', constraints: { isString: '${tgt} must be a string' }, value: plain['${src}'] });
+const validatorGen: Record<string, (targetKey: string, constraints: any[], customMsg?: string) => string> = {
+  isString: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'string') {
+    errors.push({ property: '${tgt}', constraints: { isString: ${msg || `'${tgt} must be a string'`} }, value: inst['${tgt}'] });
   }`,
-  isNumber: (src, tgt) => `if (typeof plain['${src}'] !== 'number' || isNaN(plain['${src}'])) {
-    errors.push({ property: '${tgt}', constraints: { isNumber: '${tgt} must be a number' }, value: plain['${src}'] });
+  isNumber: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'number' || isNaN(inst['${tgt}'])) {
+    errors.push({ property: '${tgt}', constraints: { isNumber: ${msg || `'${tgt} must be a number'`} }, value: inst['${tgt}'] });
   }`,
-  isInt: (src, tgt) => `if (typeof plain['${src}'] !== 'number' || !Number.isInteger(plain['${src}'])) {
-    errors.push({ property: '${tgt}', constraints: { isInt: '${tgt} must be an integer' }, value: plain['${src}'] });
+  isInt: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'number' || !Number.isInteger(inst['${tgt}'])) {
+    errors.push({ property: '${tgt}', constraints: { isInt: ${msg || `'${tgt} must be an integer'`} }, value: inst['${tgt}'] });
   }`,
-  isBoolean: (src, tgt) => `if (typeof plain['${src}'] !== 'boolean') {
-    errors.push({ property: '${tgt}', constraints: { isBoolean: '${tgt} must be a boolean' }, value: plain['${src}'] });
+  isBoolean: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'boolean') {
+    errors.push({ property: '${tgt}', constraints: { isBoolean: ${msg || `'${tgt} must be a boolean'`} }, value: inst['${tgt}'] });
   }`,
-  isNotEmpty: (src, tgt) => `if (plain['${src}'] === null || plain['${src}'] === undefined || plain['${src}'] === '') {
-    errors.push({ property: '${tgt}', constraints: { isNotEmpty: '${tgt} should not be empty' }, value: plain['${src}'] });
+  isNotEmpty: (tgt, _, msg) => `if (inst['${tgt}'] === null || inst['${tgt}'] === undefined || inst['${tgt}'] === '') {
+    errors.push({ property: '${tgt}', constraints: { isNotEmpty: ${msg || `'${tgt} should not be empty'`} }, value: inst['${tgt}'] });
   }`,
-  isArray: (src, tgt) => `if (!Array.isArray(plain['${src}'])) {
-    errors.push({ property: '${tgt}', constraints: { isArray: '${tgt} must be an array' }, value: plain['${src}'] });
+  isArray: (tgt, _, msg) => `if (!Array.isArray(inst['${tgt}'])) {
+    errors.push({ property: '${tgt}', constraints: { isArray: ${msg || `'${tgt} must be an array'`} }, value: inst['${tgt}'] });
   }`,
-  min: (src, tgt, constr) => `if (typeof plain['${src}'] === 'number' && plain['${src}'] < ${constr[0]}) {
-    errors.push({ property: '${tgt}', constraints: { min: '${tgt} must not be less than ${constr[0]}' }, value: plain['${src}'] });
+  min: (tgt, constr, msg) => `if (typeof inst['${tgt}'] === 'number' && inst['${tgt}'] < ${constr[0]}) {
+    errors.push({ property: '${tgt}', constraints: { min: ${msg || `'${tgt} must not be less than ${constr[0]}'`} }, value: inst['${tgt}'] });
   }`,
-  max: (src, tgt, constr) => `if (typeof plain['${src}'] === 'number' && plain['${src}'] > ${constr[0]}) {
-    errors.push({ property: '${tgt}', constraints: { max: '${tgt} must not be greater than ${constr[0]}' }, value: plain['${src}'] });
+  max: (tgt, constr, msg) => `if (typeof inst['${tgt}'] === 'number' && inst['${tgt}'] > ${constr[0]}) {
+    errors.push({ property: '${tgt}', constraints: { max: ${msg || `'${tgt} must not be greater than ${constr[0]}'`} }, value: inst['${tgt}'] });
   }`,
-  isEmail: (src, tgt) => `if (typeof plain['${src}'] !== 'string' || !/\\S+@\\S+\\.\\S+/.test(plain['${src}'])) {
-    errors.push({ property: '${tgt}', constraints: { isEmail: '${tgt} must be an email' }, value: plain['${src}'] });
+  isEmail: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'string' || !/\\S+@\\S+\\.\\S+/.test(inst['${tgt}'])) {
+    errors.push({ property: '${tgt}', constraints: { isEmail: ${msg || `'${tgt} must be an email'`} }, value: inst['${tgt}'] });
   }`,
-  isDateString: (src, tgt) => `if (typeof plain['${src}'] !== 'string' || isNaN(Date.parse(plain['${src}']))) {
-    errors.push({ property: '${tgt}', constraints: { isDateString: '${tgt} must be a valid ISO 8601 date string' }, value: plain['${src}'] });
+  isDateString: (tgt, _, msg) => `if (typeof inst['${tgt}'] !== 'string' || isNaN(Date.parse(inst['${tgt}']))) {
+    errors.push({ property: '${tgt}', constraints: { isDateString: ${msg || `'${tgt} must be a valid ISO 8601 date string'`} }, value: inst['${tgt}'] });
   }`
 };
 
@@ -102,6 +107,12 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
     bodyLines.push("stack.add(plain);");
   }
 
+  const groups = options?.groups;
+  const version = options?.version;
+  const excludeExtraneous = options?.excludeExtraneousValues || options?.strategy === 'excludeAll';
+  const exposeDefaultValues = options?.exposeDefaultValues !== false;
+  const exposeUnsetFields = options?.exposeUnsetFields !== false;
+
   bodyLines.push("const errors = [];");
   bodyLines.push("const inst = new cls();");
 
@@ -111,11 +122,17 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
     FastValidationError,
   };
 
-  const groups = options?.groups;
-  const version = options?.version;
-  const excludeExtraneous = options?.excludeExtraneousValues || options?.strategy === 'excludeAll';
-  const exposeDefaultValues = options?.exposeDefaultValues !== false;
-  const exposeUnsetFields = options?.exposeUnsetFields !== false;
+  if (options?.forbidNonWhitelisted) {
+    const allowedKeys = props.map(p => p.expose?.name || p.name);
+    context.allowedKeysSet = new Set(allowedKeys);
+    bodyLines.push(`  if (options && options.forbidNonWhitelisted && typeof plain === 'object' && plain !== null) {`);
+    bodyLines.push(`    for (const key of Object.keys(plain)) {`);
+    bodyLines.push(`      if (!allowedKeysSet.has(key)) {`);
+    bodyLines.push(`        errors.push({ property: key, value: plain[key], constraints: { isWhitelisted: 'property ' + key + ' should not exist' } });`);
+    bodyLines.push(`      }`);
+    bodyLines.push(`    }`);
+    bodyLines.push(`  }`);
+  }
 
   props.forEach((prop, idx) => {
     if (prop.exclude && prop.exclude.toClassOnly !== false) {
@@ -143,21 +160,6 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
     const sourceKey = prop.expose?.name || prop.name;
     const targetKey = prop.name;
 
-    // Inline validation generation
-    const rules = validationRules.get(prop.name);
-    if (rules && rules.length > 0) {
-      bodyLines.push(`  if (options && options.validate) {`);
-      rules.forEach(rule => {
-        const type = rule.name || rule.type;
-        const constr = rule.constraints;
-        const gen = validatorGen[type];
-        if (gen) {
-          bodyLines.push('    ' + gen(sourceKey, targetKey, constr));
-        }
-      });
-      bodyLines.push(`  }`);
-    }
-
     // Property mapping expression builder
     let assignExpr = '';
     if (prop.transformFn) {
@@ -168,11 +170,25 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       const typeKey = `type_${idx}`;
       context[typeKey] = prop.typeFn;
       assignExpr = `(() => {
+        const val = plain['${sourceKey}'];
+        if (val == null) return val;
         const subClass = ${typeKey}();
         if (subClass) {
-          return plainToInstance(subClass, plain['${sourceKey}'], options, stack);
+          if (subClass === Number) {
+            return Array.isArray(val) ? val.map(v => v == null ? v : Number(v)) : Number(val);
+          }
+          if (subClass === String) {
+            return Array.isArray(val) ? val.map(v => v == null ? v : String(val)) : String(val);
+          }
+          if (subClass === Boolean) {
+            return Array.isArray(val) ? val.map(v => v == null ? v : Boolean(v)) : Boolean(val);
+          }
+          if (subClass === Date) {
+            return Array.isArray(val) ? val.map(v => v == null ? v : new Date(val)) : new Date(val);
+          }
+          return plainToInstance(subClass, val, options, stack);
         }
-        return plain['${sourceKey}'];
+        return val;
       })()`;
     } else {
       let designType: any;
@@ -197,7 +213,7 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
       }
     }
 
-    // Standard compliance property writer
+    // Step 1: Standard compliance property writer
     if (exposeUnsetFields) {
       if (exposeDefaultValues) {
         bodyLines.push(`  if (plain['${sourceKey}'] !== undefined) {`);
@@ -220,6 +236,49 @@ function buildJitMapper<T>(cls: ClassConstructor<T>, options?: ClassTransformOpt
         bodyLines.push(`    delete inst['${targetKey}'];`);
         bodyLines.push(`  }`);
       }
+    }
+
+    // Step 2: Transform-Before-Validate sequencing (Validate on inst[targetKey])
+    const rules = validationRules.get(prop.name);
+    if (rules && rules.length > 0) {
+      bodyLines.push(`  if (options && options.validate) {`);
+      const isOptional = rules.some(r => (r.name || r.type) === 'isOptional');
+      if (isOptional) {
+        bodyLines.push(`    if (inst['${targetKey}'] !== undefined && inst['${targetKey}'] !== null) {`);
+      }
+      rules.forEach((rule, rIdx) => {
+        const type = rule.name || rule.type;
+        if (type === 'isOptional') return;
+        const constr = rule.constraints || [];
+        let msgExpr: string | undefined;
+        if (typeof rule.message === 'string') {
+          msgExpr = JSON.stringify(rule.message);
+        } else if (typeof rule.message === 'function') {
+          const fnKey = `msgFn_${idx}_${rIdx}`;
+          context[fnKey] = rule.message;
+          msgExpr = `${fnKey}({ target: inst, value: inst['${targetKey}'], property: '${targetKey}', constraints: ${JSON.stringify(constr)} })`;
+        }
+
+        const gen = validatorGen[type];
+        if (gen) {
+          bodyLines.push('      ' + gen(targetKey, constr, msgExpr));
+        } else if (rule.constraintCls) {
+          const constraintKey = `customConstraint_${idx}_${rIdx}`;
+          try {
+            context[constraintKey] = new rule.constraintCls();
+            bodyLines.push(`      const valid_${idx}_${rIdx} = ${constraintKey}.validate(inst['${targetKey}'], { object: inst, value: inst['${targetKey}'], property: '${targetKey}', constraints: ${JSON.stringify(constr)} });`);
+            bodyLines.push(`      if (!valid_${idx}_${rIdx}) {`);
+            bodyLines.push(`        errors.push({ property: '${targetKey}', constraints: { [${constraintKey}.name || '${type}']: ${msgExpr || `'${targetKey} failed ${type} validation'`} }, value: inst['${targetKey}'] });`);
+            bodyLines.push(`      }`);
+          } catch (e) {
+            // Ignore if constraint cannot be constructed
+          }
+        }
+      });
+      if (isOptional) {
+        bodyLines.push(`    }`);
+      }
+      bodyLines.push(`  }`);
     }
   });
 
@@ -385,6 +444,19 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V, option
 export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], options?: ClassTransformOptions, stack?: Set<any>): T | T[] {
   if (plain == null) return plain as any;
 
+  if (cls === (Number as any)) {
+    return (Array.isArray(plain) ? plain.map(v => v == null ? v : Number(v)) : Number(plain)) as any;
+  }
+  if (cls === (String as any)) {
+    return (Array.isArray(plain) ? plain.map(v => v == null ? v : String(v)) : String(plain)) as any;
+  }
+  if (cls === (Boolean as any)) {
+    return (Array.isArray(plain) ? plain.map(v => v == null ? v : Boolean(v)) : Boolean(plain)) as any;
+  }
+  if (cls === (Date as any)) {
+    return (Array.isArray(plain) ? plain.map(v => v == null ? v : new Date(v as any)) : new Date(plain as any)) as any;
+  }
+
   if (Array.isArray(plain)) {
     let mappers = (cls as any).__fastMappers__;
     if (!mappers) {
@@ -428,7 +500,8 @@ export function plainToInstance<T, V>(cls: ClassConstructor<T>, plain: V | V[], 
 export function instanceToPlain<T>(instance: T[], options?: ClassTransformOptions, stack?: Set<any>): Record<string, any>[];
 export function instanceToPlain<T>(instance: T, options?: ClassTransformOptions, stack?: Set<any>): Record<string, any>;
 export function instanceToPlain<T>(instance: T | T[], options?: ClassTransformOptions, stack?: Set<any>): Record<string, any> | Record<string, any>[] {
-  if (instance == null) return instance as any;
+  if (instance == null || typeof instance !== 'object') return instance as any;
+  if (instance instanceof Date) return instance.toISOString() as any;
 
   if (Array.isArray(instance)) {
     if (instance.length === 0) return [];
